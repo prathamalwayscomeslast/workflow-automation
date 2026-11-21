@@ -17,11 +17,11 @@ def new_context(event: str, payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def create_run(session: Session, workflow: Workflow, event: str, payload: dict[str, Any],
-               trigger_key: str | None = None) -> int | None:
+               trigger_key: str | None = None, extra: dict[str, Any] | None = None) -> int | None:
     stmt = (
         insert(Run)
         .values(workflow_id=workflow.id, status=RunStatus.PENDING, current_step=0, step_count=0,
-                context=new_context(event, payload), trigger_key=trigger_key)
+                context={**new_context(event, payload), **(extra or {})}, trigger_key=trigger_key)
         .on_conflict_do_nothing(constraint="uq_runs_workflow_trigger_key")
         .returning(Run.id)
     )
@@ -30,6 +30,8 @@ def create_run(session: Session, workflow: Workflow, event: str, payload: dict[s
 
 def dispatch_event(session: Session, event: str, payload: dict[str, Any],
                    idempotency_key: str | None = None) -> tuple[int, list[int], list[dict[str, Any]]]:
+    if event == "webhook":  # webhook-only workflows are started via their own URL
+        return 0, [], [{"reason": "use the workflow's webhook URL (/hooks/{token}) instead"}]
     workflows = session.scalars(
         select(Workflow).where(Workflow.enabled.is_(True), Workflow.trigger["event"].astext == event)
     ).all()

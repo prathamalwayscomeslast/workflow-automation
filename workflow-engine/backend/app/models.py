@@ -46,9 +46,32 @@ class Workflow(Base):
     source: Mapped[str] = mapped_column(String(20), default="json")  # json | text | yaml
     source_text: Mapped[str | None] = mapped_column(Text)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default=text("true"))
+    # Every workflow can be started by POSTing to /hooks/{webhook_token}. The token is the secret.
+    webhook_token: Mapped[str | None] = mapped_column(String(64), unique=True)
+    # Optional HMAC-SHA256 secret; when set, callers must send X-Signature-256: sha256=<hex>.
+    webhook_secret: Mapped[str | None] = mapped_column(String(128))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     __table_args__ = (Index("ix_workflows_trigger_event", text("(trigger->>'event')")),)
+
+
+class EmailAccount(Base):
+    """A user's own mailbox, connected via SMTP + app password (n8n-style credential)."""
+
+    __tablename__ = "email_accounts"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    label: Mapped[str] = mapped_column(String(100))
+    from_email: Mapped[str] = mapped_column(String(300))
+    from_name: Mapped[str | None] = mapped_column(String(200))
+    smtp_host: Mapped[str] = mapped_column(String(200))
+    smtp_port: Mapped[int] = mapped_column(Integer)
+    security: Mapped[str] = mapped_column(String(10))  # ssl | starttls | none
+    username: Mapped[str | None] = mapped_column(String(300))
+    password_encrypted: Mapped[str | None] = mapped_column(Text)
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"))
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class Run(Base):
@@ -116,9 +139,10 @@ class Outbox(Base):
     channel: Mapped[str] = mapped_column(String(30))
     recipient: Mapped[str] = mapped_column(String(300))
     payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
-    status: Mapped[str] = mapped_column(String(20), default="pending")  # pending | sent
+    status: Mapped[str] = mapped_column(String(20), default="pending")  # pending | sent | failed
     attempts: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
     last_error: Mapped[str | None] = mapped_column(Text)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), server_default=func.now())
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 

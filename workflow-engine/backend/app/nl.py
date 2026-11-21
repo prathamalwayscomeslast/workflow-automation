@@ -24,17 +24,19 @@ SYSTEM_PROMPT = """You convert a customer's plain-English automation request int
 Return ONLY a JSON object matching the provided schema.
 
 Semantics:
-- trigger.event: dotted event type, e.g. "order.created", "user.signed_up", "payment.failed", "ticket.created".
+- trigger.event: dotted event name, e.g. "order.created", "user.signed_up", "payment.failed". Every workflow also gets
+  its own webhook URL; if the request just says "when a webhook is received" (or names no event), use "webhook".
 - trigger.conditions: filters on the event payload, e.g. {"field": "amount", "op": "gt", "value": 500}.
   Combine with {"all": [...]}, {"any": [...]}, {"not": {...}}. Ops: eq ne gt gte lt lte in not_in contains exists not_exists.
 - steps run in order. Step ids are short snake_case and unique.
   - {"id","type":"task","task": one of http|echo|set|score_order|simulate_work, "params": {...}}
   - {"id","type":"wait","duration":"1 day"}  (durations like "30 minutes", "2 hours", "1 day")
   - {"id","type":"branch","condition":{...},"then":"<step id or end>","else":"<step id or end>"}
-  - {"id","type":"send_message","channel":"email|sms|slack|webhook","to":"{{trigger.email}}","body":"..."}
+  - {"id","type":"send_email","to":"{{trigger.email}}","subject":"...","body":"..."}   <- "send a message" means EMAIL
+    (omit account_id: the user's default connected mailbox is used)
 - Templates use {{path}} into the run context: trigger.<payload field>, steps.<step id>.<output field>.
 - A condition that decides WHETHER the workflow should run at all belongs in trigger.conditions, not a branch.
-- Default recipient: "{{trigger.email}}" (use "{{trigger.phone}}" for sms). Write a short, friendly message body.
+- Default recipient: "{{trigger.email}}". Write a short subject and a friendly plain-text body using trigger fields.
 """
 
 _ALLOWED_SCHEMA_KEYS = {"type", "properties", "required", "items", "anyOf", "enum", "const", "$ref",
@@ -147,9 +149,11 @@ def rules_parse(text: str) -> tuple[WorkflowSpec, list[str]]:
             break
     if event is None and m:
         event = f"{m.group(1).rstrip('s')}.created"
+    if re.search(r"\bwebhook\b", low[:120]):
+        event = "webhook"
     if event is None:
-        event = "manual"
-        notes.append("no trigger event recognised; using 'manual'")
+        event = "webhook"
+        notes.append("no trigger event recognised; start it via the workflow's webhook URL")
 
     # Split into clauses, keeping order
     clauses = [c.strip(" .") for c in re.split(r",\s*(?:and\s+)?(?:then\s+)?|\bthen\b|\band then\b|;|\.\s+", low) if c and c.strip(" .")]
@@ -206,7 +210,15 @@ def rules_parse(text: str) -> tuple[WorkflowSpec, list[str]]:
                 "welcome": "Welcome aboard, {{trigger.name}}!",
                 "reminder": "Friendly reminder from our team.",
             }.get(label, f"Automated {label} message.")
-            add({"id": f"send_{_slug(label)}", "type": "send_message", "channel": channel, "to": to, "body": body})
+            if channel == "email":
+                subject = {
+                    "follow-up": "Following up on your order", "thank-you": "Thank you!",
+                    "welcome": "Welcome!", "reminder": "A friendly reminder", "confirmation": "Confirmation",
+                    "receipt": "Your receipt", "alert": "Alert",
+                }.get(label, "Update")
+                add({"id": f"email_{_slug(label)}", "type": "send_email", "to": to, "subject": subject, "body": body})
+            else:
+                add({"id": f"send_{_slug(label)}", "type": "send_message", "channel": channel, "to": to, "body": body})
             continue
 
         um = re.search(r"(https?://\S+)", t if "http" in c else "")
@@ -225,9 +237,29 @@ def rules_parse(text: str) -> tuple[WorkflowSpec, list[str]]:
     trigger: dict[str, Any] = {"event": event}
     if conditions:
         trigger["conditions"] = conditions[0] if len(conditions) == 1 else {"all": conditions}
-    name = t[:80] + ("..." if len(t) > 80 else "")
-    spec = WorkflowSpec.model_validate({"name": name, "description": t, "trigger": trigger, "steps": steps})
+    spec = WorkflowSpec.model_validate({"name": _short_name(event, conditions, steps), "description": t,
+                                        "trigger": trigger, "steps": steps})
     return spec, notes
+
+
+def _short_name(event: str, conditions: list[dict[str, Any]], steps: list[dict[str, Any]]) -> str:
+    """'Order created over $500: wait 1 day → follow-up email' instead of echoing the sentence."""
+    head = "Webhook" if event == "webhook" else event.replace(".", " ").replace("_", " ").capitalize()
+    for c in conditions[:1]:
+        word = {"gt": "over", "gte": "from", "lt": "under", "lte": "up to"}.get(c["op"], c["op"])
+        money = "$" if c["field"] == "amount" else ""
+        head += f" {word} {money}{c['value']}"
+    parts = []
+    for s in steps[:4]:
+        if s["type"] == "wait":
+            parts.append(f"wait {s['duration']}")
+        elif s["type"] == "send_email":
+            parts.append(s["id"].removeprefix("email_").replace("_", "-") + " email")
+        elif s["type"] == "send_message":
+            parts.append(f"{s['channel']} message")
+        else:
+            parts.append(s["id"].replace("_", " "))
+    return f"{head}: {' → '.join(parts)}"[:200]
 
 
 def generate(text: str) -> tuple[WorkflowSpec, str, list[str]]:

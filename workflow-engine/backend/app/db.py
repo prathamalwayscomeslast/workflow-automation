@@ -70,4 +70,19 @@ def get_db() -> Iterator[Session]:
 def init_db() -> None:
     from . import models  # noqa: F401  (register tables)
 
-    models.Base.metadata.create_all(get_engine())
+    from sqlalchemy import text
+
+    engine = get_engine()
+    models.Base.metadata.create_all(engine)
+    # create_all never alters existing tables; these idempotent statements bring databases
+    # created by earlier versions up to date. (Alembic would replace this in production.)
+    with engine.begin() as conn:
+        for stmt in (
+            "ALTER TABLE workflows ADD COLUMN IF NOT EXISTS webhook_token VARCHAR(64)",
+            "ALTER TABLE workflows ADD COLUMN IF NOT EXISTS webhook_secret VARCHAR(128)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_workflows_webhook_token ON workflows (webhook_token)",
+            "UPDATE workflows SET webhook_token = replace(gen_random_uuid()::text, '-', '')"
+            " || replace(gen_random_uuid()::text, '-', '') WHERE webhook_token IS NULL",
+            "ALTER TABLE outbox ADD COLUMN IF NOT EXISTS next_attempt_at TIMESTAMPTZ DEFAULT now()",
+        ):
+            conn.execute(text(stmt))

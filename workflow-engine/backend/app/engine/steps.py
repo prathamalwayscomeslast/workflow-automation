@@ -12,7 +12,7 @@ from typing import Any, Callable
 import httpx
 
 from ..config import get_settings
-from ..schemas import BranchStep, SendMessageStep, TaskStep, WaitStep, parse_duration
+from ..schemas import BranchStep, SendEmailStep, SendMessageStep, TaskStep, WaitStep, parse_duration
 from .conditions import evaluate, render
 
 
@@ -97,6 +97,41 @@ def run_send_message(step: SendMessageStep, ctx: StepContext) -> StepResult:
     return StepResult(
         output={"idempotency_key": key, "channel": step.channel, "to": recipient, "queued": True},
         outbox={"idempotency_key": key, "channel": step.channel, "recipient": recipient, "payload": payload},
+    )
+
+
+def resolve_email_account_id(account_id: int | None) -> int:
+    """Explicit account, else the default one, else the only one. Fails the step clearly."""
+    from sqlalchemy import select
+
+    from ..db import session_scope
+    from ..models import EmailAccount
+
+    with session_scope() as s:
+        if account_id is not None:
+            if s.get(EmailAccount, account_id) is None:
+                raise ValueError(f"email account {account_id} not found")
+            return account_id
+        accounts = s.scalars(select(EmailAccount).order_by(EmailAccount.is_default.desc(), EmailAccount.id)).all()
+        if not accounts:
+            raise ValueError("no email account connected - add one via POST /email-accounts")
+        return accounts[0].id
+
+
+@step_type("send_email")
+def run_send_email(step: SendEmailStep, ctx: StepContext) -> StepResult:
+    account_id = resolve_email_account_id(step.account_id)
+    to = str(render(step.to, ctx.context) or "").strip()
+    if not to or "@" not in to:
+        raise ValueError(f"invalid recipient {to!r} (template {step.to!r})")
+    cc = str(render(step.cc, ctx.context) or "").strip() if step.cc else None
+    subject = str(render(step.subject, ctx.context) or "")
+    body = str(render(step.body, ctx.context) or "")
+    key = f"{ctx.run_id}:{step.id}:{ctx.seq}"
+    payload = {"account_id": account_id, "to": to, "cc": cc, "subject": subject, "body": body}
+    return StepResult(
+        output={"idempotency_key": key, "account_id": account_id, "to": to, "subject": subject, "queued": True},
+        outbox={"idempotency_key": key, "channel": "email", "recipient": to, "payload": payload},
     )
 
 

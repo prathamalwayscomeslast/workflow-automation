@@ -85,10 +85,12 @@ def compile_yaml(source: str) -> WorkflowSpec:
         raise ValueError("YAML must be a mapping")
     # PyYAML (YAML 1.1) parses the bare key `on` as boolean True.
     on = doc.get("on", doc.get(True, doc.get("trigger")))
-    if isinstance(on, str):
-        trigger: dict[str, Any] = {"event": on}
+    if on is None:
+        trigger: dict[str, Any] = {"event": "webhook"}
+    elif isinstance(on, str):
+        trigger = {"event": on}
     elif isinstance(on, dict):
-        trigger = {"event": on.get("event") or on.get("type")}
+        trigger = {"event": on.get("event") or "webhook"}  # `on: {webhook: {}}` or `on: {if: ...}`
         cond = on.get("if") or on.get("conditions")
         if cond is not None:
             trigger["conditions"] = _cond(cond)
@@ -128,15 +130,22 @@ def compile_yaml(source: str) -> WorkflowSpec:
             action = {"type": "task", "task": task_name, "params": _templ(st.get("with") or {})}
         elif "wait" in st:
             action = {"type": "wait", "duration": st["wait"]}
-        elif "send" in st:
-            send = st["send"] if isinstance(st["send"], dict) else {"body": str(st["send"])}
-            action = {"type": "send_message", "channel": send.get("channel", "email"),
-                      "to": _templ(send.get("to", "{{trigger.email}}")), "body": _templ(send.get("body", "")),
-                      **({"subject": _templ(send["subject"])} if send.get("subject") else {})}
+        elif "send" in st or "email" in st:
+            raw_send = st.get("email", st.get("send"))
+            send = raw_send if isinstance(raw_send, dict) else {"body": str(raw_send)}
+            channel = send.get("channel", "email")
+            if channel == "email":  # real email from the user's connected mailbox
+                action = {"type": "send_email", "to": _templ(send.get("to", "{{trigger.email}}")),
+                          "subject": _templ(send.get("subject", "Notification")), "body": _templ(send.get("body", "")),
+                          **({"cc": _templ(send["cc"])} if send.get("cc") else {}),
+                          **({"account_id": int(send["account"])} if send.get("account") else {})}
+            else:
+                action = {"type": "send_message", "channel": channel,
+                          "to": _templ(send.get("to", "")), "body": _templ(send.get("body", ""))}
 
         if action is None:
             if "if" not in st or "then" not in st:
-                raise ValueError(f"step {sid!r} needs one of uses/wait/send, or if+then")
+                raise ValueError(f"step {sid!r} needs one of uses/wait/send/email, or if+then")
             steps.append({"id": sid, "type": "branch", "condition": _cond(st["if"]),
                           "then": ref(st["then"]), **({"else": ref(st["else"])} if st.get("else") else {}),
                           **common})

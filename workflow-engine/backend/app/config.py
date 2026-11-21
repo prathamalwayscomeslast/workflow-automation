@@ -28,6 +28,13 @@ class Settings(BaseSettings):
     # Multiplier applied to every `wait` duration (lets demos/tests run "1 day" in seconds).
     wait_time_scale: float = 1.0
 
+    # Base URL used to build webhook URLs shown to users (set to your public/ngrok URL).
+    public_base_url: str = "http://localhost:8000"
+    # Fernet key for stored credentials; auto-generated into backend/.secret_key if empty.
+    encryption_key: str = ""
+    # Outbox delivery retries (exponential backoff) before a message is marked failed.
+    outbox_max_attempts: int = 6
+
     # Delivery: if set, messages are POSTed here (with an Idempotency-Key header)
     # in addition to the local sink table.
     message_webhook_url: str = ""

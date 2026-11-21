@@ -11,10 +11,11 @@ from __future__ import annotations
 import logging
 import os
 import threading
+from datetime import timedelta
 from typing import Any
 
 import httpx
-from sqlalchemy import func, select, text
+from sqlalchemy import func, or_, select, text
 from sqlalchemy.orm import Session
 
 from ..config import get_settings
@@ -57,8 +58,36 @@ class WebhookProvider:
         r.raise_for_status()
 
 
-def _providers() -> list[Any]:
-    providers: list[Any] = [LocalSinkProvider()]
+class SmtpEmailProvider:
+    """Sends from the user's connected mailbox. Deterministic Message-ID from the outbox key."""
+
+    def __init__(self, session: Session) -> None:
+        self.session = session
+
+    def send(self, key: str, channel: str, recipient: str, payload: dict[str, Any]) -> None:
+        from .. import email_smtp
+        from ..crypto import decrypt
+        from ..models import EmailAccount
+
+        acct = self.session.get(EmailAccount, payload["account_id"])
+        if acct is None:
+            raise RuntimeError(f"email account {payload['account_id']} was deleted")
+        cfg = email_smtp.SmtpConfig(
+            host=acct.smtp_host, port=acct.smtp_port, security=acct.security,
+            username=acct.username, password=decrypt(acct.password_encrypted) if acct.password_encrypted else None,
+            from_email=acct.from_email, from_name=acct.from_name)
+        msg = email_smtp.build_message(cfg, payload["to"], payload.get("subject") or "", payload.get("body") or "",
+                                       cc=payload.get("cc"), message_id=email_smtp.message_id_for(key, acct.from_email))
+        try:
+            email_smtp.send(cfg, msg)
+        except Exception as e:
+            raise RuntimeError(email_smtp.friendly_error(e)) from e
+
+
+def _providers(session: Session, payload: dict[str, Any]) -> list[Any]:
+    if payload.get("account_id") is not None:  # real email
+        return [SmtpEmailProvider(session)]
+    providers: list[Any] = [LocalSinkProvider()]  # demo channel
     url = get_settings().message_webhook_url
     if url:
         providers.append(WebhookProvider(url))
@@ -82,10 +111,12 @@ def _chaos_tick() -> None:
 def deliver_pending(limit: int = 50, keys: list[str] | None = None) -> int:
     """Deliver pending outbox rows. Safe to call concurrently from many workers."""
     sent = 0
+    max_attempts = get_settings().outbox_max_attempts
     with session_scope() as s:
         q = (
             select(Outbox)
-            .where(Outbox.status == "pending")
+            .where(Outbox.status == "pending",
+                   or_(Outbox.next_attempt_at.is_(None), Outbox.next_attempt_at <= func.now()))
             .order_by(Outbox.id)
             .limit(limit)
             .with_for_update(skip_locked=True)
@@ -96,11 +127,18 @@ def deliver_pending(limit: int = 50, keys: list[str] | None = None) -> int:
         for row in rows:
             row.attempts += 1
             try:
-                for p in _providers():
+                for p in _providers(s, row.payload):
                     p.send(row.idempotency_key, row.channel, row.recipient, row.payload)
-            except Exception as e:  # leave pending; dispatcher retries on next tick
+            except Exception as e:
                 row.last_error = str(e)[:1000]
-                log.warning("delivery failed for %s: %s", row.idempotency_key, e)
+                if row.attempts >= max_attempts:
+                    row.status = "failed"
+                    log.error("delivery of %s failed permanently after %s attempts: %s",
+                              row.idempotency_key, row.attempts, e)
+                else:  # exponential backoff: 10s, 20s, 40s, 80s, ...
+                    row.next_attempt_at = func.now() + timedelta(seconds=5 * 2 ** row.attempts)
+                    log.warning("delivery of %s failed (attempt %s), retrying: %s",
+                                row.idempotency_key, row.attempts, e)
                 continue
             _chaos_tick()
             row.status = "sent"

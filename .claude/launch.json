@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "relay-frontend",
+      "runtimeExecutable": "C:\\Program Files\\nodejs\\npm.cmd",
+      "runtimeArgs": ["--prefix", "workflow-engine/frontend", "run", "dev"],
+      "port": 5173
+    }
+  ]
+}

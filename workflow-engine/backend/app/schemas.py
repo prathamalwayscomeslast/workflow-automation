@@ -123,12 +123,24 @@ class SendMessageStep(StepBase):
     body: str = Field(description="Message text; supports {{templates}} from the run context")
 
 
-Step = Annotated[Union[TaskStep, WaitStep, BranchStep, SendMessageStep], Field(discriminator="type")]
+class SendEmailStep(StepBase):
+    """Send a real email from one of the user's connected mailboxes (SMTP)."""
+    type: Literal["send_email"] = "send_email"
+    account_id: int | None = Field(default=None, description="Email account id; default account if omitted")
+    to: str = Field(description="Recipient(s), comma separated; supports {{templates}}")
+    cc: str | None = None
+    subject: str = Field(description="Subject; supports {{templates}}")
+    body: str = Field(description="Plain-text body; supports {{templates}}")
+
+
+Step = Annotated[Union[TaskStep, WaitStep, BranchStep, SendMessageStep, SendEmailStep], Field(discriminator="type")]
 
 
 class Trigger(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    event: str = Field(min_length=1, description="Event type, e.g. 'order.created'")
+    event: str = Field(default="webhook", min_length=1,
+                       description="Event name for POST /events, e.g. 'order.created'. Every workflow can "
+                                   "also be started via its own webhook URL.")
     conditions: Condition | None = None
 
 
@@ -178,6 +190,43 @@ class WorkflowOut(BaseModel):
     source_text: str | None = None
     enabled: bool
     created_at: datetime
+    webhook_url: str | None = None
+    webhook_signed: bool = False
+
+
+class EmailAccountIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    label: str = Field(default="My email", max_length=100)
+    provider: Literal["gmail", "outlook", "yahoo", "zoho", "custom"] = "gmail"
+    from_email: str = Field(pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+    from_name: str | None = None
+    username: str | None = Field(default=None, description="Defaults to from_email")
+    password: str | None = Field(default=None, description="App password (Gmail/Outlook/Yahoo/Zoho) or SMTP password")
+    smtp_host: str | None = Field(default=None, description="Required for provider=custom")
+    smtp_port: int | None = None
+    security: Literal["ssl", "starttls", "none"] | None = None
+    is_default: bool = False
+    send_test_to: str | None = Field(default=None, description="Where to send the verification email (default: from_email)")
+
+
+class EmailAccountOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    label: str
+    from_email: str
+    from_name: str | None
+    smtp_host: str
+    smtp_port: int
+    security: str
+    username: str | None
+    is_default: bool
+    verified_at: datetime | None
+    created_at: datetime
+
+
+class WebhookSettings(BaseModel):
+    rotate_token: bool = False
+    secret: str | None = Field(default=None, description="Set an HMAC secret; empty string removes it")
 
 
 class FromTextRequest(BaseModel):

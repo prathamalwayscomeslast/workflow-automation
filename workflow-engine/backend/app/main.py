@@ -13,7 +13,8 @@ from .config import get_settings
 from .db import init_db
 from .engine.steps import TASKS
 from .engine.worker import Worker
-from .routes import runs, workflows
+from .engine.steps import STEP_HANDLERS
+from .routes import email_accounts, hooks, runs, workflows
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
@@ -34,10 +35,13 @@ app = FastAPI(title="Workflow Automation Engine", version="1.0.0", lifespan=life
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 app.include_router(workflows.router)
 app.include_router(runs.router)
+app.include_router(hooks.router)
+app.include_router(email_accounts.router)
 
 
 @app.get("/health")
 def health() -> dict[str, object]:
     s = get_settings()
     return {"ok": True, "worker": s.run_worker, "nl_generator": "claude" if s.anthropic_api_key else "rules",
-            "wait_time_scale": s.wait_time_scale, "tasks": sorted(TASKS)}
+            "wait_time_scale": s.wait_time_scale, "public_base_url": s.public_base_url,
+            "step_types": sorted(STEP_HANDLERS), "tasks": sorted(TASKS)}
